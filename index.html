@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3色分布マップ</title>
+ 
+  <!-- CSV解析用ライブラリ PapaParse -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+ 
+  <style>
+    /* ページ背景：透明（色を付けたい場合は transparent を #f5f5f5 などに変更） */
+    html, body { background: transparent; }
+    body { font-family: sans-serif; text-align: center; }
+ 
+    #map svg { width: 80%; max-width: 700px; height: auto; }
+ 
+    .prefecture {
+      fill: #e0e0e0; /* 初期値（グレー） */
+      stroke: #ffffff;
+      stroke-width: 1.5;
+      transition: fill 0.5s ease;
+      cursor: pointer;
+    }
+    .prefecture:hover { opacity: 0.8; }
+    .prefecture.selected { stroke: #000000; stroke-width: 3; }
+ 
+    #info {
+      margin: 10px auto; padding: 10px 14px; max-width: 460px;
+      border: 1px solid #ccc; border-radius: 8px; font-size: 15px; line-height: 1.7;
+    }
+    .swatch {
+      display: inline-block; width: 1.3em; height: 1.3em; margin-right: 8px;
+      vertical-align: middle; border: 1px solid #999;
+    }
+ 
+    #status { margin: 15px; font-weight: bold; color: #555; }
+    button { margin: 4px; padding: 8px 14px; font-size: 14px; cursor: pointer; }
+  </style>
+</head>
+<body>
+ 
+  <h1>3色分布マップ</h1>
+  <div id="status">データを読み込み中...</div>
+ 
+  <div>
+    <button id="btn-png">PNG保存（背景透明）</button>
+    <button id="btn-svg">SVG保存</button>
+  </div>
+ 
+  <div id="info">地図の都道府県をタップすると、RGB値が表示されます</div>
+ 
+  <!-- 地図SVGがここに読み込まれます -->
+  <div id="map"></div>
+ 
+  <script>
+    // 公開したスプレッドシートのCSV URL
+    const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRYN1iWNq5SJGieYHh0kVkXT71bOVZHn6phlxWABHEdwIuvLLn2l8T7zrIMbr7h6Hm3ovZDAON-x0_A/pub?gid=0&single=true&output=csv';
+ 
+    // 全列(green / blue / red)の値の中で最大のものを基準にして 0〜1 にする（1 = 全体で最大）
+    function makeNormalizer(rows, keys) {
+      const values = rows
+        .flatMap(r => keys.map(k => parseFloat(r[k])))
+        .filter(v => !isNaN(v));
+      const max = Math.max(...values);
+      return v => parseFloat(v) / max;
+    }
+ 
+    // 白から、緑・青・赤のフィルターを重ねる（値が大きいほど 0 に近づき暗くなる）
+    // sG = green, sB = blue, sR = red（それぞれ 0〜1）。戻り値は [R, G, B]（0〜255）
+    function mixRgb(sG, sB, sR) {
+      if ([sG, sB, sR].some(isNaN)) return null; // 数値でない場合は null
+      return [
+        255 * (1 - sG) * (1 - sB),
+        255 * (1 - sB) * (1 - sR),
+        255 * (1 - sG) * (1 - sR)
+      ].map(Math.round);
+    }
+ 
+    // 県全体(g)と中のpathの両方に色を塗る
+    function paint(el, color) {
+      el.style.fill = color;
+      el.querySelectorAll('path').forEach(p => { p.style.fill = color; });
+    }
+ 
+    async function updateMapFromSheet() {
+      const statusEl = document.getElementById('status');
+ 
+      try {
+        // ① 地図SVGを読み込んで埋め込む
+        const svgText = await (await fetch('./map-full.svg')).text();
+        document.getElementById('map').innerHTML = svgText;
+ 
+        // ② 都道府県コード → 要素 の対応表を作る
+        const byCode = {};
+        document.querySelectorAll('.prefecture').forEach(p => {
+          byCode[parseInt(p.dataset.code, 10)] = p;
+        });
+ 
+        // ③ スプレッドシートを取得して塗る
+        const csvText = await (await fetch(CSV_URL)).text();
+        Papa.parse(csvText, {
+          header: true,
+          skipEmptyLines: true,
+          transformHeader: h => h.trim().toLowerCase(), // 列名の空白・大文字小文字を無視
+          complete: results => {
+            const rows = results.data;
+            const fields = results.meta.fields || [];
+ 
+            // 必要な列があるか確認（無ければ画面に理由を出す）
+            const missing = ['pref_id', 'green', 'blue', 'red'].filter(k => !fields.includes(k));
+            if (missing.length) {
+              statusEl.textContent = `列が見つかりません: ${missing.join(', ')}（読み取れた列: ${fields.join(', ')}）`;
+              return;
+            }
+ 
+            const norm = makeNormalizer(rows, ['green', 'blue', 'red']);
+            let painted = 0;
+ 
+            rows.forEach(row => {
+              const code = parseInt(row.pref_id, 10);
+              const el = byCode[code];
+              if (!el) return;
+              const rgb = mixRgb(norm(row.green), norm(row.blue), norm(row.red));
+              paint(el, rgb ? `rgb(${rgb.join(', ')})` : '#e0e0e0');
+              infoByCode[code] = { rgb, green: row.green, blue: row.blue, red: row.red };
+              if (rgb) painted++;
+            });
+ 
+            statusEl.textContent = painted
+              ? `同期完了：${painted}県を着色しました`
+              : '色を計算できませんでした。pref_id が 1〜47 か、green / blue / red が数字か確認してください';
+          }
+        });
+      } catch (error) {
+        console.error('読み込みに失敗しました:', error);
+        statusEl.textContent = '読み込みに失敗しました（ローカルサーバー経由で開いていますか？）';
+      }
+    }
+ 
+    // ---- 地図の保存（ダウンロード） ----
+ 
+    // ページのCSSに頼らず単体で表示できるSVGを作る
+    function buildStandaloneSvg() {
+      const svg = document.querySelector('#map svg');
+      if (!svg) return null;
+ 
+      const clone = svg.cloneNode(true);
+      clone.querySelectorAll('.prefecture').forEach(g => {
+        g.style.stroke = '#ffffff';
+        g.style.strokeWidth = '1.5';
+        if (!g.style.fill) g.style.fill = '#e0e0e0'; // 未着色の県
+      });
+      // リンク用のxlink属性は保存時に不要なので外す
+      clone.querySelectorAll('a').forEach(a => {
+        a.removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
+      });
+ 
+      // 縦横比は viewBox から求める
+      const vb = svg.viewBox.baseVal;
+      const ratio = vb && vb.width ? vb.height / vb.width : 1;
+      const width = 2000;
+      const height = Math.round(width * ratio);
+      clone.setAttribute('width', width);
+      clone.setAttribute('height', height);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+ 
+      return { xml: new XMLSerializer().serializeToString(clone), width, height };
+    }
+ 
+    function saveFile(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+ 
+    function downloadSvg() {
+      const s = buildStandaloneSvg();
+      if (!s) return;
+      saveFile(new Blob([s.xml], { type: 'image/svg+xml;charset=utf-8' }), 'color-map.svg');
+    }
+ 
+    function downloadPng() {
+      const s = buildStandaloneSvg();
+      if (!s) return;
+      const url = URL.createObjectURL(new Blob([s.xml], { type: 'image/svg+xml;charset=utf-8' }));
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = s.width;
+        canvas.height = s.height;
+        canvas.getContext('2d').drawImage(img, 0, 0, s.width, s.height); // 背景は透明のまま
+        URL.revokeObjectURL(url);
+        canvas.toBlob(blob => saveFile(blob, 'color-map.png'), 'image/png');
+      };
+      img.src = url;
+    }
+ 
+    // ---- タップでRGB値を表示 ----
+    const infoByCode = {}; // 都道府県コード → { rgb, green, blue, red }
+ 
+    function toHex(rgb) {
+      return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+    }
+ 
+    document.getElementById('map').addEventListener('click', e => {
+      const pref = e.target.closest('.prefecture');
+      if (!pref) return;
+ 
+      const code = parseInt(pref.dataset.code, 10);
+      const title = pref.querySelector('title');
+      const name = title ? title.textContent.split('/')[0].trim() : `コード ${code}`;
+      const d = infoByCode[code];
+      const info = document.getElementById('info');
+ 
+      // 選択中の県を黒枠で強調（枠が隣に隠れないよう最前面へ）
+      document.querySelectorAll('.prefecture.selected').forEach(x => x.classList.remove('selected'));
+      pref.classList.add('selected');
+      pref.parentNode.appendChild(pref);
+ 
+      info.textContent = '';
+      if (!d || !d.rgb) {
+        info.append(`${name}：データなし`);
+        return;
+      }
+ 
+      const [r, g, b] = d.rgb;
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = `rgb(${r}, ${g}, ${b})`;
+ 
+      info.append(swatch, `${name}　RGB(${r}, ${g}, ${b})　${toHex(d.rgb)}`);
+      info.append(document.createElement('br'), `green ${d.green} / blue ${d.blue} / red ${d.red}`);
+    });
+ 
+    document.getElementById('btn-png').addEventListener('click', downloadPng);
+    document.getElementById('btn-svg').addEventListener('click', downloadSvg);
+ 
+    window.addEventListener('DOMContentLoaded', updateMapFromSheet);
+  </script>
+ 
+</body>
+</html>
+ 
