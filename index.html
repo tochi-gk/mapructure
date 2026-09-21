@@ -4,17 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>色分け日本地図</title>
- 
+
   <!-- CSV解析用ライブラリ PapaParse -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
- 
+
   <style>
     /* ページ背景：透明（色を付けたい場合は transparent を #f5f5f5 などに変更） */
     html, body { background: transparent; }
     body { font-family: sans-serif; text-align: center; }
- 
+
     #map svg { width: 80%; max-width: 700px; height: auto; }
- 
+
     .prefecture {
       fill: #e0e0e0; /* 初期値（グレー） */
       stroke: #ffffff;
@@ -24,10 +24,10 @@
     }
     .prefecture:hover { opacity: 0.8; }
     .prefecture.selected { stroke: #000000; stroke-width: 3; }
- 
+
     #status { margin: 15px; font-weight: bold; color: #555; }
     button { margin: 4px; padding: 8px 14px; font-size: 14px; cursor: pointer; }
- 
+
     /* モード選択・基準値・色コードの設定画面 */
     #controls {
       margin: 10px auto; padding: 10px 14px; max-width: 520px;
@@ -39,16 +39,16 @@
     #ref { width: 7em; font-size: 15px; }
     #column { font-size: 15px; }
     #range-hint { font-size: 13px; color: #555; white-space: pre-line; }
- 
+
     #palette-note { margin-top: 10px; font-size: 13px; color: #555; }
     #palette .row { display: flex; align-items: center; gap: 8px; }
     #palette .name { width: 7.5em; }
     #palette input.hex { width: 9em; font-family: monospace; font-size: 15px; }
     #palette input.invalid { border: 2px solid #d33; }
- 
+
     #legend-bar { height: 14px; margin-top: 8px; border: 1px solid #999; border-radius: 3px; }
     #legend-text { margin-top: 4px; font-size: 13px; color: #555; }
- 
+
     #info {
       margin: 10px auto; padding: 10px 14px; max-width: 460px;
       border: 1px solid #ccc; border-radius: 8px; font-size: 15px; line-height: 1.7;
@@ -60,10 +60,10 @@
   </style>
 </head>
 <body>
- 
+
   <h1>色分け日本地図</h1>
   <div id="status">データを読み込み中...</div>
- 
+
   <!-- モード選択・基準値・色コードの設定 -->
   <div id="controls">
     <div class="row">
@@ -72,7 +72,7 @@
       <label><input type="radio" name="mode" value="1"> 1色（赤）</label>
       <label><input type="radio" name="mode" value="2"> 2色（赤・青）</label>
     </div>
- 
+
     <div id="single-controls" style="display:none">
       <div class="row">
         <label>使う列 <select id="column"></select></label>
@@ -82,30 +82,35 @@
         <label class="wrap"><input type="checkbox" id="common"> 全列（3列全体）の最大・最小値をそろえる（他の列・年と比較したいとき）</label>
       </div>
       <div id="range-hint"></div>
- 
+
+      <div class="row"><strong>何を基準にするか</strong></div>
+      <div class="row"><label class="wrap"><input type="radio" name="basis" value="max"> 最大値を基準（最小値の色は「基準値−(最大値−基準値)」の位置）</label></div>
+      <div class="row"><label class="wrap"><input type="radio" name="basis" value="ref" checked> 基準値を基準（最大値・最小値の色は、データの最大・最小の位置）</label></div>
+      <div class="row"><label class="wrap"><input type="radio" name="basis" value="min"> 最小値を基準（最大値の色は「基準値+(基準値−最小値)」の位置）</label></div>
+
       <div id="palette-note">色はカラーコード（例：#ff0000）で変更できます。空欄にした色は使わず、残りの色の間で塗ります（2つ以上必要）。</div>
       <div id="palette"></div>
       <button id="btn-reset-colors">色を初期値に戻す</button>
     </div>
- 
+
     <div id="legend-bar" style="display:none"></div>
     <div id="legend-text" style="display:none"></div>
   </div>
- 
+
   <div>
     <button id="btn-png">PNG保存（背景透明）</button>
     <button id="btn-svg">SVG保存</button>
   </div>
- 
+
   <div id="info">地図の都道府県をタップすると、RGB値が表示されます</div>
- 
+
   <!-- 地図SVGがここに読み込まれます -->
   <div id="map"></div>
- 
+
   <script>
     // 公開したスプレッドシートのCSV URL
     const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRYN1iWNq5SJGieYHh0kVkXT71bOVZHn6phlxWABHEdwIuvLLn2l8T7zrIMbr7h6Hm3ovZDAON-x0_A/pub?gid=0&single=true&output=csv';
- 
+
     // ================= 色の設定（初期値。画面上のカラーコード欄からも変更できます） =================
     const NODATA = '#e0e0e0';   // データのない県
     const STEP = 1;             // 2色モード：基準値から ±いくつで「基準値±1」の色になるか
@@ -115,32 +120,32 @@
       // 2色モード：最小値 → 基準値-1 → 基準値 → 基準値+1 → 最大値
       '2': { low: '#000050', down: '#c0c0ff', ref: '#999999', up: '#ffc0c0', high: '#500000' }
     };
- 
+
     // ================= 色の計算 =================
     const clamp01 = t => Math.min(1, Math.max(0, t));
     const rgbStr = c => `rgb(${c.join(', ')})`;
     const toHex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
     const hexToRgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
     const round2 = x => Math.round(x * 100) / 100;
- 
+
     // "#f00" "ff0000" "#FF0000" などを "#ff0000" に整える。不正なら null
     function normalizeHex(str) {
       let h = String(str).trim().replace(/^#/, '');
       if (/^[0-9a-fA-F]{3}$/.test(h)) h = h.split('').map(ch => ch + ch).join('');
       return /^[0-9a-fA-F]{6}$/.test(h) ? '#' + h.toLowerCase() : null;
     }
- 
+
     // c1 → c2 を t(0〜1) の位置で補間
     function lerp(c1, c2, t) {
       t = clamp01(t);
       return c1.map((v, i) => Math.round(v + (c2[i] - v) * t));
     }
- 
+
     // 値 v が a → b のどこにあるかで、色 ca → cb を補間
     function between(v, a, b, ca, cb) {
       return lerp(ca, cb, b === a ? 1 : (v - a) / (b - a));
     }
- 
+
     // 「位置(値)と色の組」を位置の昇順に並べたものに対して、値 v の色を返す
     // 端より外側は、端の色のまま
     function gradientAt(v, anchors) {
@@ -151,7 +156,7 @@
       }
       return anchors[anchors.length - 1].color;
     }
- 
+
     // 3色モード：全列(green / blue / red)の最大値を基準に 0〜1 にする
     function makeNormalizer(rows, keys) {
       const values = rows
@@ -160,7 +165,7 @@
       const max = Math.max(...values);
       return v => parseFloat(v) / max;
     }
- 
+
     // 白から、緑・青・赤のフィルターを重ねる。戻り値は [R, G, B]（0〜255）
     function mixRgb(sG, sB, sR) {
       if ([sG, sB, sR].some(isNaN)) return null; // 数値でない場合は null
@@ -171,22 +176,23 @@
       ].map(Math.round);
     }
     // ================= /色の計算 =================
- 
+
     // 県全体(g)と中のpathの両方に色を塗る
     function paint(el, color) {
       el.style.fill = color;
       el.querySelectorAll('path').forEach(p => { p.style.fill = color; });
     }
- 
+
     // ---- 状態 ----
     const state = {
       rows: [], fields: [], byCode: {},
       mode: '3', column: '', ref: 0,
       common: false, // true：全列の最大・最小値を基準にそろえる
+      basis: 'ref',  // 何を基準にするか：'ref' 基準値 / 'max' 最大値 / 'min' 最小値
       palette: JSON.parse(JSON.stringify(DEFAULT_PALETTE))
     };
     const infoByCode = {}; // 都道府県コード → { rgb, label }
- 
+
     // 数値の配列から 最小・最大・中央値
     function statsOf(values) {
       const v = values.filter(x => !isNaN(x)).sort((a, b) => a - b);
@@ -195,58 +201,71 @@
       const median = v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
       return { min: v[0], max: v[v.length - 1], median };
     }
- 
+
     // 選んだ列だけの統計
     function columnStats(col) {
       return statsOf(state.rows.map(r => parseFloat(r[col])));
     }
- 
+
     // 全列（pref_id 以外）をまとめた統計
     function allStats() {
       const cols = state.fields.filter(f => f !== 'pref_id');
       return statsOf(state.rows.flatMap(r => cols.map(c => parseFloat(r[c]))));
     }
- 
+
+    // 色の両端（最小値の色・最大値の色になる値）を、選んだ基準に合わせて決める
+    //   ref：基準値を基準 … 最大・最小はデータの値そのまま
+    //   max：最大値を基準 … 最小の位置 ＝ 基準値 −（最大値 − 基準値）
+    //   min：最小値を基準 … 最大の位置 ＝ 基準値 +（基準値 − 最小値）
+    // 対称の位置が求められない場合（基準値が最大値以上／最小値以下）はデータの値を使う
+    function resolveEnds(stats, ref, basis) {
+      let minPos = stats.min;
+      let maxPos = stats.max;
+      if (basis === 'max' && stats.max > ref) minPos = ref - (stats.max - ref);
+      if (basis === 'min' && ref > stats.min) maxPos = ref + (ref - stats.min);
+      return { minPos, maxPos };
+    }
+
     // 1色・2色モードの「値 → 色」の関数を用意する
     function getScale() {
       if (state.mode === '3') return null;
       const own = columnStats(state.column);
       if (!own) return null;
- 
+
       const stats = state.common ? (allStats() || own) : own; // 最大・最小の基準
       const ref = state.ref;
       const pal = state.palette[state.mode];
- 
-      let low = null;   // 1色モードで、基準値と最大値の差から求めた「最小値の色になる値」
-      let defs;         // [色の名前, その色になる値]
-      if (state.mode === '1') {
-        const diff = stats.max - ref;
-        if (pal.ref !== '' && diff > 0) low = ref - diff; // 基準値−(最大値−基準値)
-        defs = [['low', low !== null ? low : stats.min], ['ref', ref], ['high', stats.max]];
-      } else {
-        defs = [['low', stats.min], ['down', ref - STEP], ['ref', ref], ['up', ref + STEP], ['high', stats.max]];
-      }
- 
+
+      // 基準値の色を使わない（空欄）ときは基準値が無関係なので、データの最小〜最大をそのまま使う
+      const ends = pal.ref !== ''
+        ? resolveEnds(stats, ref, state.basis)
+        : { minPos: stats.min, maxPos: stats.max };
+
+      // [色の名前, その色になる値]
+      const defs = state.mode === '1'
+        ? [['low', ends.minPos], ['ref', ref], ['high', ends.maxPos]]
+        : [['low', ends.minPos], ['down', ref - STEP], ['ref', ref], ['up', ref + STEP], ['high', ends.maxPos]];
+
       // 空欄の色は使わない。残った色を値の昇順に並べる
       const anchors = defs
         .filter(([key]) => pal[key] !== '')
         .map(([key, pos]) => ({ pos, color: hexToRgb(pal[key]) }))
         .sort((a, b) => a.pos - b.pos);
- 
+
       if (anchors.length < 2) {
         return { error: '色を2つ以上指定してください（空欄の色は使いません）' };
       }
-      return { stats, low, anchors, colorAt: v => gradientAt(v, anchors) };
+      return { stats, ends, anchors, colorAt: v => gradientAt(v, anchors) };
     }
- 
+
     // ---- 塗り分け ----
     function render() {
       if (!state.rows.length) return;
       const statusEl = document.getElementById('status');
- 
+
       Object.keys(infoByCode).forEach(k => delete infoByCode[k]);
       Object.values(state.byCode).forEach(el => paint(el, NODATA));
- 
+
       let painted = 0;
       const setColor = (code, rgb, label) => {
         const el = state.byCode[code];
@@ -255,7 +274,7 @@
         infoByCode[code] = { rgb, label };
         painted++;
       };
- 
+
       if (state.mode === '3') {
         const keys = ['green', 'blue', 'red'];
         const missing = keys.filter(k => !state.fields.includes(k));
@@ -291,69 +310,71 @@
           setColor(parseInt(row.pref_id, 10), sc.colorAt(v), `${col} ${row[col]}`);
         });
       }
- 
+
       statusEl.textContent = painted
         ? `同期完了：${painted}県を着色しました`
         : '色を計算できませんでした。pref_id が 1〜47 か、値が数字か確認してください';
       updateLegend();
     }
- 
+
     // ---- 凡例（グラデーションバー） ----
     function updateLegend() {
       const bar = document.getElementById('legend-bar');
       const text = document.getElementById('legend-text');
       bar.style.display = text.style.display = 'none';
- 
+
       const sc = getScale();
       if (!sc || sc.error || sc.stats.max === sc.stats.min) return;
- 
+
       const { min, max } = sc.stats;
       const pos = v => Math.round((v - min) / (max - min) * 1000) / 10;
- 
+
       // 色の変わり目を、実際の色計算の結果で並べる（範囲内のものだけ）
       const breaks = sc.anchors.map(a => a.pos).filter(p => p > min && p < max);
       const points = [min, ...breaks, max];
       bar.style.background = 'linear-gradient(to right, '
         + points.map(v => `${rgbStr(sc.colorAt(v))} ${pos(v)}%`).join(', ') + ')';
- 
+
       const scope = state.common ? '（全列）' : '';
-      const note = sc.low !== null
-        ? `　／　最小値の色になる値 ${round2(sc.low)}（基準値−(最大−基準値)）`
+      // 色の両端がデータの最小・最大と違うときだけ、その位置を表示
+      const { minPos, maxPos } = sc.ends;
+      const note = (minPos !== min || maxPos !== max)
+        ? `　／　最小値の色＝${round2(minPos)}、最大値の色＝${round2(maxPos)}`
         : '';
       text.textContent = `左端＝最小 ${min}${scope}　／　基準値 ${state.ref}　／　右端＝最大 ${max}${scope}${note}`;
       bar.style.display = text.style.display = 'block';
     }
- 
+
     // ---- 色コード入力欄 ----
     const PALETTE_LABELS = {
       '1': [['high', '最大値'], ['ref', '基準値'], ['low', '最小値']],
       '2': [['high', '最大値'], ['up', '基準値＋1'], ['ref', '基準値'], ['down', '基準値－1'], ['low', '最小値']]
     };
- 
+
     function buildPaletteInputs() {
       const box = document.getElementById('palette');
       box.innerHTML = '';
       if (state.mode === '3') return;
- 
+
       PALETTE_LABELS[state.mode].forEach(([key, label]) => {
         const row = document.createElement('div');
         row.className = 'row';
- 
+
         const name = document.createElement('span');
         name.className = 'name';
         name.textContent = label;
- 
+
         const swatch = document.createElement('span');
         swatch.className = 'swatch';
         swatch.style.background = state.palette[state.mode][key] || 'transparent';
- 
+
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'hex';
         input.maxLength = 7;
         input.placeholder = '空欄＝使わない';
         input.value = state.palette[state.mode][key];
- 
+
         input.addEventListener('input', () => {
           const raw = input.value.trim();
           if (raw === '') { // 空欄：この色は使わない
@@ -370,12 +391,12 @@
           swatch.style.background = hex;
           render();
         });
- 
+
         row.append(name, swatch, input);
         box.append(row);
       });
     }
- 
+
     // ---- 設定画面 ----
     // 基準値・範囲の表示を更新する
     function updateRangeHint() {
@@ -385,7 +406,7 @@
       if (all) t += `\n全列の 最小 ${all.min} ／ 最大 ${all.max}`;
       document.getElementById('range-hint').textContent = t;
     }
- 
+
     // 基準値を、選んだ列の中央値に戻す
     function resetRef() {
       const stats = columnStats(state.column);
@@ -393,7 +414,7 @@
       document.getElementById('ref').value = state.ref;
       updateRangeHint();
     }
- 
+
     function setupControls() {
       const candidates = state.fields.filter(f => f !== 'pref_id');
       const sel = document.getElementById('column');
@@ -401,14 +422,15 @@
       candidates.forEach(f => sel.append(new Option(f, f)));
       state.column = candidates[0] || '';
       resetRef();
- 
+
       // ブラウザがラジオボタン・チェックボックスの状態を復元している場合に合わせる
       state.mode = document.querySelector('input[name="mode"]:checked').value;
       state.common = document.getElementById('common').checked;
+      state.basis = document.querySelector('input[name="basis"]:checked').value;
       document.getElementById('single-controls').style.display = state.mode === '3' ? 'none' : 'block';
       buildPaletteInputs();
     }
- 
+
     document.querySelectorAll('input[name="mode"]').forEach(radio => {
       radio.addEventListener('change', () => {
         state.mode = radio.value;
@@ -417,47 +439,54 @@
         render();
       });
     });
- 
+
     document.getElementById('column').addEventListener('change', e => {
       state.column = e.target.value;
       // 全列そろえのときは、列を変えても基準値を保つ（年どうしを同じ基準で比べるため）
       if (state.common) updateRangeHint(); else resetRef();
       render();
     });
- 
+
     document.getElementById('ref').addEventListener('input', e => {
       const v = parseFloat(e.target.value);
       if (isNaN(v)) return;
       state.ref = v;
       render();
     });
- 
+
+    document.querySelectorAll('input[name="basis"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        state.basis = radio.value;
+        render();
+      });
+    });
+
     document.getElementById('common').addEventListener('change', e => {
       state.common = e.target.checked;
       render();
     });
- 
+
     document.getElementById('btn-reset-colors').addEventListener('click', () => {
       state.palette = JSON.parse(JSON.stringify(DEFAULT_PALETTE));
       buildPaletteInputs();
       render();
     });
- 
+
     // ---- 読み込み ----
     async function updateMapFromSheet() {
       const statusEl = document.getElementById('status');
- 
+
       try {
         // ① 地図SVGを読み込んで埋め込む
         const svgText = await (await fetch('./map-full.svg')).text();
         document.getElementById('map').innerHTML = svgText;
- 
+
         // ② 都道府県コード → 要素 の対応表を作る
         state.byCode = {};
         document.querySelectorAll('.prefecture').forEach(p => {
           state.byCode[parseInt(p.dataset.code, 10)] = p;
         });
- 
+
         // ③ スプレッドシートを取得
         const csvText = await (await fetch(CSV_URL)).text();
         const results = Papa.parse(csvText, {
@@ -467,7 +496,7 @@
         });
         state.rows = results.data;
         state.fields = results.meta.fields || [];
- 
+
         if (!state.fields.includes('pref_id')) {
           state.rows = [];
           statusEl.textContent = `列 pref_id が見つかりません（読み取れた列: ${state.fields.join(', ')}）`;
@@ -477,7 +506,7 @@
           statusEl.textContent = 'データの行がありません';
           return;
         }
- 
+
         setupControls();
         render();
       } catch (error) {
@@ -485,14 +514,14 @@
         statusEl.textContent = '読み込みに失敗しました（ローカルサーバー経由で開いていますか？）';
       }
     }
- 
+
     // ---- 地図の保存（ダウンロード） ----
- 
+
     // ページのCSSに頼らず単体で表示できるSVGを作る
     function buildStandaloneSvg() {
       const svg = document.querySelector('#map svg');
       if (!svg) return null;
- 
+
       const clone = svg.cloneNode(true);
       clone.querySelectorAll('.prefecture').forEach(g => {
         g.style.stroke = '#ffffff';
@@ -503,7 +532,7 @@
       clone.querySelectorAll('a').forEach(a => {
         a.removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
       });
- 
+
       // 縦横比は viewBox から求める
       const vb = svg.viewBox.baseVal;
       const ratio = vb && vb.width ? vb.height / vb.width : 1;
@@ -512,10 +541,10 @@
       clone.setAttribute('width', width);
       clone.setAttribute('height', height);
       clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
- 
+
       return { xml: new XMLSerializer().serializeToString(clone), width, height };
     }
- 
+
     function saveFile(blob, filename) {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -523,13 +552,13 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     }
- 
+
     function downloadSvg() {
       const s = buildStandaloneSvg();
       if (!s) return;
       saveFile(new Blob([s.xml], { type: 'image/svg+xml;charset=utf-8' }), 'color-map.svg');
     }
- 
+
     function downloadPng() {
       const s = buildStandaloneSvg();
       if (!s) return;
@@ -545,44 +574,43 @@
       };
       img.src = url;
     }
- 
+
     // ---- タップでRGB値を表示 ----
     document.getElementById('map').addEventListener('click', e => {
       const pref = e.target.closest('.prefecture');
       if (!pref) return;
- 
+
       const code = parseInt(pref.dataset.code, 10);
       const title = pref.querySelector('title');
       const name = title ? title.textContent.split('/')[0].trim() : `コード ${code}`;
       const d = infoByCode[code];
       const info = document.getElementById('info');
- 
+
       // 選択中の県を黒枠で強調（枠が隣に隠れないよう最前面へ）
       document.querySelectorAll('.prefecture.selected').forEach(x => x.classList.remove('selected'));
       pref.classList.add('selected');
       pref.parentNode.appendChild(pref);
- 
+
       info.textContent = '';
       if (!d || !d.rgb) {
         info.append(`${name}：データなし`);
         return;
       }
- 
+
       const [r, g, b] = d.rgb;
       const swatch = document.createElement('span');
       swatch.className = 'swatch';
       swatch.style.background = rgbStr(d.rgb);
- 
+
       info.append(swatch, `${name}　RGB(${r}, ${g}, ${b})　${toHex(d.rgb)}`);
       info.append(document.createElement('br'), d.label);
     });
- 
+
     document.getElementById('btn-png').addEventListener('click', downloadPng);
     document.getElementById('btn-svg').addEventListener('click', downloadSvg);
- 
+
     window.addEventListener('DOMContentLoaded', updateMapFromSheet);
   </script>
- 
+
 </body>
 </html>
- 
