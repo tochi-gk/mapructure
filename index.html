@@ -28,7 +28,7 @@
     #status { margin: 15px; font-weight: bold; color: #555; }
     button { margin: 4px; padding: 8px 14px; font-size: 14px; cursor: pointer; }
 
-    /* モード選択・基準値・色コードの設定画面 */
+    /* モード選択・基準・色コードの設定画面 */
     #controls {
       margin: 10px auto; padding: 10px 14px; max-width: 520px;
       border: 1px solid #ccc; border-radius: 8px; text-align: left; font-size: 15px;
@@ -36,9 +36,14 @@
     #controls .row { margin: 6px 0; }
     #controls label { margin-right: 14px; white-space: nowrap; }
     #controls label.wrap { white-space: normal; }
-    #ref { width: 7em; font-size: 15px; }
     #column { font-size: 15px; }
     #range-hint { font-size: 13px; color: #555; white-space: pre-line; }
+
+    #points { margin: 8px 0 4px 1.4em; }
+    #points input { width: 7em; font-size: 15px; }
+    #points input:disabled { background: #eee; color: #555; }
+    #points .calc { font-size: 13px; color: #555; }
+    #pts-warn { font-size: 13px; color: #d33; min-height: 1em; }
 
     #palette-note { margin-top: 10px; font-size: 13px; color: #555; }
     #palette .row { display: flex; align-items: center; gap: 8px; }
@@ -64,7 +69,7 @@
   <h1>色分け日本地図</h1>
   <div id="status">データを読み込み中...</div>
 
-  <!-- モード選択・基準値・色コードの設定 -->
+  <!-- モード選択・基準・色コードの設定 -->
   <div id="controls">
     <div class="row">
       <strong>モード</strong>　
@@ -76,17 +81,24 @@
     <div id="single-controls" style="display:none">
       <div class="row">
         <label>使う列 <select id="column"></select></label>
-        <label>基準値 <input type="number" id="ref" step="any"></label>
       </div>
       <div class="row">
         <label class="wrap"><input type="checkbox" id="common"> 全列（3列全体）の最大・最小値をそろえる（他の列・年と比較したいとき）</label>
       </div>
       <div id="range-hint"></div>
 
-      <div class="row"><strong>何を基準にするか</strong></div>
-      <div class="row"><label class="wrap"><input type="radio" name="basis" value="max"> 最大値を基準（最小値の色は「基準値−(最大値−基準値)」の位置）</label></div>
-      <div class="row"><label class="wrap"><input type="radio" name="basis" value="ref" checked> 基準値を基準（最大値・最小値の色は、データの最大・最小の位置）</label></div>
-      <div class="row"><label class="wrap"><input type="radio" name="basis" value="min"> 最小値を基準（最大値の色は「基準値+(基準値−最小値)」の位置）</label></div>
+      <div class="row"><strong>基準にする2点</strong>（この2点を指定すると、残りの1点が左右対称に決まります）</div>
+      <div class="row"><label class="wrap"><input type="radio" name="pair" value="max-ref" checked> 最大値と基準値 → 最小値 ＝ 基準値−(最大値−基準値)</label></div>
+      <div class="row"><label class="wrap"><input type="radio" name="pair" value="ref-min"> 基準値と最小値 → 最大値 ＝ 基準値+(基準値−最小値)</label></div>
+      <div class="row"><label class="wrap"><input type="radio" name="pair" value="max-min"> 最大値と最小値 → 基準値 ＝ (最大値+最小値)÷2</label></div>
+
+      <div id="points">
+        <div class="row"><label>最大値 <input type="number" id="pt-max" step="any"></label> <span class="calc" id="calc-max"></span></div>
+        <div class="row"><label>基準値 <input type="number" id="pt-ref" step="any"></label> <span class="calc" id="calc-ref"></span></div>
+        <div class="row"><label>最小値 <input type="number" id="pt-min" step="any"></label> <span class="calc" id="calc-min"></span></div>
+      </div>
+      <div id="pts-warn"></div>
+      <button id="btn-fill-data">最大・最小・基準値をデータの値に戻す</button>
 
       <div id="palette-note">色はカラーコード（例：#ff0000）で変更できます。空欄にした色は使わず、残りの色の間で塗ります（2つ以上必要）。</div>
       <div id="palette"></div>
@@ -186,12 +198,24 @@
     // ---- 状態 ----
     const state = {
       rows: [], fields: [], byCode: {},
-      mode: '3', column: '', ref: 0,
-      common: false, // true：全列の最大・最小値を基準にそろえる
-      basis: 'ref',  // 何を基準にするか：'ref' 基準値 / 'max' 最大値 / 'min' 最小値
+      mode: '3', column: '',
+      pts: { max: 0, ref: 0, min: 0 }, // 指定した値（初期値はデータから）
+      pair: 'max-ref',                 // 基準にする2点：'max-ref' / 'ref-min' / 'max-min'
+      common: false,                   // true：全列の最大・最小値をそろえる
       palette: JSON.parse(JSON.stringify(DEFAULT_PALETTE))
     };
     const infoByCode = {}; // 都道府県コード → { rgb, label }
+
+    // 計算で決まる点（pair ごとに、残りの1点）
+    const DERIVED = { 'max-ref': 'min', 'ref-min': 'max', 'max-min': 'ref' };
+
+    // 指定した2点から、残りの1点を左右対称に求める
+    function resolvePoints() {
+      const { max, ref, min } = state.pts;
+      if (state.pair === 'max-ref') return { max, ref, min: ref - (max - ref) };
+      if (state.pair === 'ref-min') return { max: ref + (ref - min), ref, min };
+      return { max, ref: (max + min) / 2, min };
+    }
 
     // 数値の配列から 最小・最大・中央値
     function statsOf(values) {
@@ -213,38 +237,20 @@
       return statsOf(state.rows.flatMap(r => cols.map(c => parseFloat(r[c]))));
     }
 
-    // 色の両端（最小値の色・最大値の色になる値）を、選んだ基準に合わせて決める
-    //   ref：基準値を基準 … 最大・最小はデータの値そのまま
-    //   max：最大値を基準 … 最小の位置 ＝ 基準値 −（最大値 − 基準値）
-    //   min：最小値を基準 … 最大の位置 ＝ 基準値 +（基準値 − 最小値）
-    // 対称の位置が求められない場合（基準値が最大値以上／最小値以下）はデータの値を使う
-    function resolveEnds(stats, ref, basis) {
-      let minPos = stats.min;
-      let maxPos = stats.max;
-      if (basis === 'max' && stats.max > ref) minPos = ref - (stats.max - ref);
-      if (basis === 'min' && ref > stats.min) maxPos = ref + (ref - stats.min);
-      return { minPos, maxPos };
-    }
-
     // 1色・2色モードの「値 → 色」の関数を用意する
     function getScale() {
       if (state.mode === '3') return null;
       const own = columnStats(state.column);
       if (!own) return null;
 
-      const stats = state.common ? (allStats() || own) : own; // 最大・最小の基準
-      const ref = state.ref;
+      const stats = state.common ? (allStats() || own) : own; // 凡例に使うデータの範囲
+      const pts = resolvePoints();                            // 色の位置（最大・基準・最小）
       const pal = state.palette[state.mode];
-
-      // 基準値の色を使わない（空欄）ときは基準値が無関係なので、データの最小〜最大をそのまま使う
-      const ends = pal.ref !== ''
-        ? resolveEnds(stats, ref, state.basis)
-        : { minPos: stats.min, maxPos: stats.max };
 
       // [色の名前, その色になる値]
       const defs = state.mode === '1'
-        ? [['low', ends.minPos], ['ref', ref], ['high', ends.maxPos]]
-        : [['low', ends.minPos], ['down', ref - STEP], ['ref', ref], ['up', ref + STEP], ['high', ends.maxPos]];
+        ? [['low', pts.min], ['ref', pts.ref], ['high', pts.max]]
+        : [['low', pts.min], ['down', pts.ref - STEP], ['ref', pts.ref], ['up', pts.ref + STEP], ['high', pts.max]];
 
       // 空欄の色は使わない。残った色を値の昇順に並べる
       const anchors = defs
@@ -255,7 +261,7 @@
       if (anchors.length < 2) {
         return { error: '色を2つ以上指定してください（空欄の色は使いません）' };
       }
-      return { stats, ends, anchors, colorAt: v => gradientAt(v, anchors) };
+      return { stats, pts, anchors, colorAt: v => gradientAt(v, anchors) };
     }
 
     // ---- 塗り分け ----
@@ -329,19 +335,16 @@
       const { min, max } = sc.stats;
       const pos = v => Math.round((v - min) / (max - min) * 1000) / 10;
 
-      // 色の変わり目を、実際の色計算の結果で並べる（範囲内のものだけ）
+      // 色の変わり目を、実際の色計算の結果で並べる（データの範囲内のものだけ）
       const breaks = sc.anchors.map(a => a.pos).filter(p => p > min && p < max);
       const points = [min, ...breaks, max];
       bar.style.background = 'linear-gradient(to right, '
         + points.map(v => `${rgbStr(sc.colorAt(v))} ${pos(v)}%`).join(', ') + ')';
 
       const scope = state.common ? '（全列）' : '';
-      // 色の両端がデータの最小・最大と違うときだけ、その位置を表示
-      const { minPos, maxPos } = sc.ends;
-      const note = (minPos !== min || maxPos !== max)
-        ? `　／　最小値の色＝${round2(minPos)}、最大値の色＝${round2(maxPos)}`
-        : '';
-      text.textContent = `左端＝最小 ${min}${scope}　／　基準値 ${state.ref}　／　右端＝最大 ${max}${scope}${note}`;
+      const { pts } = sc;
+      text.textContent = `左端＝データの最小 ${min}${scope}　／　右端＝データの最大 ${max}${scope}`
+        + `　／　色の位置：最小値 ${round2(pts.min)}・基準値 ${round2(pts.ref)}・最大値 ${round2(pts.max)}`;
       bar.style.display = text.style.display = 'block';
     }
 
@@ -397,8 +400,29 @@
       });
     }
 
-    // ---- 設定画面 ----
-    // 基準値・範囲の表示を更新する
+    // ---- 最大値・基準値・最小値の入力欄 ----
+    // 入力欄の表示を、指定値／計算で決まる値に合わせる（入力中の欄は触らない）
+    function syncPointInputs() {
+      const eff = resolvePoints();
+      const derived = DERIVED[state.pair];
+
+      ['max', 'ref', 'min'].forEach(k => {
+        const input = document.getElementById('pt-' + k);
+        const isDerived = k === derived;
+        input.disabled = isDerived;
+        if (isDerived) input.value = round2(eff[k]);
+        else if (document.activeElement !== input) input.value = state.pts[k];
+        document.getElementById('calc-' + k).textContent = isDerived ? '← 2点から計算で決まる値' : '';
+      });
+
+      // 最大値 > 基準値 > 最小値 になっていない場合は注意を出す
+      document.getElementById('pts-warn').textContent =
+        (eff.max > eff.ref && eff.ref > eff.min)
+          ? ''
+          : '最大値 ＞ 基準値 ＞ 最小値 になるように指定してください';
+    }
+
+    // データの範囲を表示
     function updateRangeHint() {
       const own = columnStats(state.column);
       const all = allStats();
@@ -407,26 +431,32 @@
       document.getElementById('range-hint').textContent = t;
     }
 
-    // 基準値を、選んだ列の中央値に戻す
-    function resetRef() {
-      const stats = columnStats(state.column);
-      state.ref = stats ? Math.round(stats.median * 100) / 100 : 0;
-      document.getElementById('ref').value = state.ref;
+    // 最大値・最小値をデータから入れ直す（基準値は、keepRef が false のとき列の中央値に戻す）
+    function fillFromData(keepRef) {
+      const own = columnStats(state.column);
+      if (!own) return;
+      const stats = state.common ? (allStats() || own) : own;
+      state.pts.max = stats.max;
+      state.pts.min = stats.min;
+      if (!keepRef) state.pts.ref = round2(own.median);
       updateRangeHint();
+      syncPointInputs();
     }
 
+    // ---- 設定画面 ----
     function setupControls() {
       const candidates = state.fields.filter(f => f !== 'pref_id');
       const sel = document.getElementById('column');
       sel.innerHTML = '';
       candidates.forEach(f => sel.append(new Option(f, f)));
       state.column = candidates[0] || '';
-      resetRef();
 
       // ブラウザがラジオボタン・チェックボックスの状態を復元している場合に合わせる
       state.mode = document.querySelector('input[name="mode"]:checked').value;
+      state.pair = document.querySelector('input[name="pair"]:checked').value;
       state.common = document.getElementById('common').checked;
-      state.basis = document.querySelector('input[name="basis"]:checked').value;
+
+      fillFromData(false);
       document.getElementById('single-controls').style.display = state.mode === '3' ? 'none' : 'block';
       buildPaletteInputs();
     }
@@ -440,29 +470,39 @@
       });
     });
 
-    document.getElementById('column').addEventListener('change', e => {
-      state.column = e.target.value;
-      // 全列そろえのときは、列を変えても基準値を保つ（年どうしを同じ基準で比べるため）
-      if (state.common) updateRangeHint(); else resetRef();
-      render();
-    });
-
-    document.getElementById('ref').addEventListener('input', e => {
-      const v = parseFloat(e.target.value);
-      if (isNaN(v)) return;
-      state.ref = v;
-      render();
-    });
-
-    document.querySelectorAll('input[name="basis"]').forEach(radio => {
+    document.querySelectorAll('input[name="pair"]').forEach(radio => {
       radio.addEventListener('change', () => {
-        state.basis = radio.value;
+        state.pair = radio.value;
+        syncPointInputs();
         render();
       });
     });
 
+    document.getElementById('column').addEventListener('change', e => {
+      state.column = e.target.value;
+      // 全列そろえのときは、列を変えても基準値を保つ（年どうしを同じ基準で比べるため）
+      fillFromData(state.common);
+      render();
+    });
+
     document.getElementById('common').addEventListener('change', e => {
       state.common = e.target.checked;
+      fillFromData(true); // 最大・最小を新しい範囲に合わせる（基準値はそのまま）
+      render();
+    });
+
+    ['max', 'ref', 'min'].forEach(k => {
+      document.getElementById('pt-' + k).addEventListener('input', e => {
+        const v = parseFloat(e.target.value);
+        if (isNaN(v)) return;
+        state.pts[k] = v;
+        syncPointInputs(); // 計算で決まる値を更新
+        render();
+      });
+    });
+
+    document.getElementById('btn-fill-data').addEventListener('click', () => {
+      fillFromData(false);
       render();
     });
 
