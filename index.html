@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>3色分布マップ</title>
+  <title>色分け日本地図</title>
  
   <!-- CSV解析用ライブラリ PapaParse -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -25,6 +25,22 @@
     .prefecture:hover { opacity: 0.8; }
     .prefecture.selected { stroke: #000000; stroke-width: 3; }
  
+    #status { margin: 15px; font-weight: bold; color: #555; }
+    button { margin: 4px; padding: 8px 14px; font-size: 14px; cursor: pointer; }
+ 
+    /* モード選択・基準値の設定画面 */
+    #controls {
+      margin: 10px auto; padding: 10px 14px; max-width: 520px;
+      border: 1px solid #ccc; border-radius: 8px; text-align: left; font-size: 15px;
+    }
+    #controls .row { margin: 6px 0; }
+    #controls label { margin-right: 14px; white-space: nowrap; }
+    #ref { width: 7em; font-size: 15px; }
+    #column { font-size: 15px; }
+    #range-hint { font-size: 13px; color: #555; }
+    #legend-bar { height: 14px; margin-top: 8px; border: 1px solid #999; border-radius: 3px; }
+    #legend-text { margin-top: 4px; font-size: 13px; color: #555; }
+ 
     #info {
       margin: 10px auto; padding: 10px 14px; max-width: 460px;
       border: 1px solid #ccc; border-radius: 8px; font-size: 15px; line-height: 1.7;
@@ -33,15 +49,33 @@
       display: inline-block; width: 1.3em; height: 1.3em; margin-right: 8px;
       vertical-align: middle; border: 1px solid #999;
     }
- 
-    #status { margin: 15px; font-weight: bold; color: #555; }
-    button { margin: 4px; padding: 8px 14px; font-size: 14px; cursor: pointer; }
   </style>
 </head>
 <body>
  
-  <h1>3色分布マップ</h1>
+  <h1>色分け日本地図</h1>
   <div id="status">データを読み込み中...</div>
+ 
+  <!-- モード選択と基準値の設定 -->
+  <div id="controls">
+    <div class="row">
+      <strong>モード</strong>　
+      <label><input type="radio" name="mode" value="3" checked> 3色</label>
+      <label><input type="radio" name="mode" value="1"> 1色（赤）</label>
+      <label><input type="radio" name="mode" value="2"> 2色（赤・青）</label>
+    </div>
+ 
+    <div id="single-controls" style="display:none">
+      <div class="row">
+        <label>使う列 <select id="column"></select></label>
+        <label>基準値 <input type="number" id="ref" step="any"></label>
+      </div>
+      <div id="range-hint"></div>
+    </div>
+ 
+    <div id="legend-bar" style="display:none"></div>
+    <div id="legend-text" style="display:none"></div>
+  </div>
  
   <div>
     <button id="btn-png">PNG保存（背景透明）</button>
@@ -57,7 +91,55 @@
     // 公開したスプレッドシートのCSV URL
     const CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRYN1iWNq5SJGieYHh0kVkXT71bOVZHn6phlxWABHEdwIuvLLn2l8T7zrIMbr7h6Hm3ovZDAON-x0_A/pub?gid=0&single=true&output=csv';
  
-    // 全列(green / blue / red)の値の中で最大のものを基準にして 0〜1 にする（1 = 全体で最大）
+    // ================= 色の設定（変えたいときはここを書き換え） =================
+    const NODATA = '#e0e0e0';   // データのない県
+    const STEP = 1;             // 2色モード：基準値から ±いくつで 赤／青 になるか
+    const COL = {
+      white:    [255, 255, 255], // 1色モード：最小値
+      red:      [255, 0, 0],     // 1色モード：基準値 / 2色モード：基準値+STEP
+      darkRed:  [0x20, 0, 0],    // 最大値 #200000
+      gray:     [0x99, 0x99, 0x99], // 2色モード：基準値 #999999
+      blue:     [0, 0, 255],     // 2色モード：基準値-STEP
+      darkBlue: [0, 0, 0x22]     // 2色モード：最小値 #000022
+    };
+ 
+    // ================= 色の計算 =================
+    const clamp01 = t => Math.min(1, Math.max(0, t));
+    const rgbStr = c => `rgb(${c.join(', ')})`;
+    const toHex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
+ 
+    // c1 → c2 を t(0〜1) の位置で補間
+    function lerp(c1, c2, t) {
+      t = clamp01(t);
+      return c1.map((v, i) => Math.round(v + (c2[i] - v) * t));
+    }
+ 
+    // 値 v が a → b のどこにあるかで、色 ca → cb を補間
+    function between(v, a, b, ca, cb) {
+      return lerp(ca, cb, b === a ? 1 : (v - a) / (b - a));
+    }
+ 
+    // 1色モード：最小=白 → 基準値=#ff0000 → 最大=#200000
+    function colorOne(v, s) {
+      return v <= s.ref
+        ? between(v, s.min, s.ref, COL.white, COL.red)
+        : between(v, s.ref, s.max, COL.red, COL.darkRed);
+    }
+ 
+    // 2色モード：最小=#000022 → 基準値-STEP=青 → 基準値=#999999 → 基準値+STEP=赤 → 最大=#200000
+    function colorTwo(v, s) {
+      const d = v - s.ref;
+      if (d >= 0) {
+        return d <= STEP
+          ? lerp(COL.gray, COL.red, d / STEP)
+          : between(v, s.ref + STEP, s.max, COL.red, COL.darkRed);
+      }
+      return -d <= STEP
+        ? lerp(COL.gray, COL.blue, -d / STEP)
+        : between(v, s.ref - STEP, s.min, COL.blue, COL.darkBlue);
+    }
+ 
+    // 3色モード：全列(green / blue / red)の最大値を基準に 0〜1 にする
     function makeNormalizer(rows, keys) {
       const values = rows
         .flatMap(r => keys.map(k => parseFloat(r[k])))
@@ -66,8 +148,7 @@
       return v => parseFloat(v) / max;
     }
  
-    // 白から、緑・青・赤のフィルターを重ねる（値が大きいほど 0 に近づき暗くなる）
-    // sG = green, sB = blue, sR = red（それぞれ 0〜1）。戻り値は [R, G, B]（0〜255）
+    // 白から、緑・青・赤のフィルターを重ねる。戻り値は [R, G, B]（0〜255）
     function mixRgb(sG, sB, sR) {
       if ([sG, sB, sR].some(isNaN)) return null; // 数値でない場合は null
       return [
@@ -76,6 +157,7 @@
         255 * (1 - sG) * (1 - sR)
       ].map(Math.round);
     }
+    // ================= /色の計算 =================
  
     // 県全体(g)と中のpathの両方に色を塗る
     function paint(el, color) {
@@ -83,6 +165,139 @@
       el.querySelectorAll('path').forEach(p => { p.style.fill = color; });
     }
  
+    // ---- 状態 ----
+    const state = { rows: [], fields: [], byCode: {}, mode: '3', column: '', ref: 0 };
+    const infoByCode = {}; // 都道府県コード → { rgb, label }
+ 
+    // 列の最小・最大・中央値
+    function columnStats(col) {
+      const v = state.rows.map(r => parseFloat(r[col])).filter(x => !isNaN(x)).sort((a, b) => a - b);
+      if (!v.length) return null;
+      const mid = Math.floor(v.length / 2);
+      const median = v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+      return { min: v[0], max: v[v.length - 1], median };
+    }
+ 
+    // ---- 塗り分け ----
+    function render() {
+      if (!state.rows.length) return;
+      const statusEl = document.getElementById('status');
+ 
+      Object.keys(infoByCode).forEach(k => delete infoByCode[k]);
+      Object.values(state.byCode).forEach(el => paint(el, NODATA));
+ 
+      let painted = 0;
+      const setColor = (code, rgb, label) => {
+        const el = state.byCode[code];
+        if (!el || !rgb) return;
+        paint(el, rgbStr(rgb));
+        infoByCode[code] = { rgb, label };
+        painted++;
+      };
+ 
+      if (state.mode === '3') {
+        const keys = ['green', 'blue', 'red'];
+        const missing = keys.filter(k => !state.fields.includes(k));
+        if (missing.length) {
+          statusEl.textContent = `3色モードには列が必要です: ${missing.join(', ')}（読み取れた列: ${state.fields.join(', ')}）`;
+          updateLegend();
+          return;
+        }
+        const norm = makeNormalizer(state.rows, keys);
+        state.rows.forEach(row => {
+          setColor(
+            parseInt(row.pref_id, 10),
+            mixRgb(norm(row.green), norm(row.blue), norm(row.red)),
+            `green ${row.green} / blue ${row.blue} / red ${row.red}`
+          );
+        });
+      } else {
+        const col = state.column;
+        const stats = columnStats(col);
+        if (!stats) {
+          statusEl.textContent = `列「${col}」に数値がありません`;
+          updateLegend();
+          return;
+        }
+        const s = { min: stats.min, max: stats.max, ref: state.ref };
+        const fn = state.mode === '1' ? colorOne : colorTwo;
+        state.rows.forEach(row => {
+          const v = parseFloat(row[col]);
+          if (isNaN(v)) return;
+          setColor(parseInt(row.pref_id, 10), fn(v, s), `${col} ${row[col]}`);
+        });
+      }
+ 
+      statusEl.textContent = painted
+        ? `同期完了：${painted}県を着色しました`
+        : '色を計算できませんでした。pref_id が 1〜47 か、値が数字か確認してください';
+      updateLegend();
+    }
+ 
+    // ---- 凡例（グラデーションバー） ----
+    function updateLegend() {
+      const bar = document.getElementById('legend-bar');
+      const text = document.getElementById('legend-text');
+      bar.style.display = text.style.display = 'none';
+      if (state.mode === '3') return;
+ 
+      const stats = columnStats(state.column);
+      if (!stats || stats.max === stats.min) return;
+      const { min, max } = stats;
+      const ref = state.ref;
+      const pos = v => Math.round(clamp01((v - min) / (max - min)) * 1000) / 10;
+ 
+      const stops = state.mode === '1'
+        ? [[min, COL.white], [ref, COL.red], [max, COL.darkRed]]
+        : [[min, COL.darkBlue], [ref - STEP, COL.blue], [ref, COL.gray], [ref + STEP, COL.red], [max, COL.darkRed]];
+ 
+      bar.style.background = 'linear-gradient(to right, '
+        + stops.map(([v, c]) => `${rgbStr(c)} ${pos(v)}%`).join(', ') + ')';
+      text.textContent = `左端＝最小 ${min}　／　基準値 ${ref}　／　右端＝最大 ${max}`;
+      bar.style.display = text.style.display = 'block';
+    }
+ 
+    // ---- 設定画面 ----
+    function resetRef() {
+      const stats = columnStats(state.column);
+      state.ref = stats ? Math.round(stats.median * 100) / 100 : 0;
+      document.getElementById('ref').value = state.ref;
+      document.getElementById('range-hint').textContent = stats
+        ? `この列の 最小 ${stats.min} ／ 最大 ${stats.max} ／ 中央値 ${stats.median}`
+        : '';
+    }
+ 
+    function setupControls() {
+      const candidates = state.fields.filter(f => f !== 'pref_id');
+      const sel = document.getElementById('column');
+      sel.innerHTML = '';
+      candidates.forEach(f => sel.append(new Option(f, f)));
+      state.column = candidates[0] || '';
+      resetRef();
+    }
+ 
+    document.querySelectorAll('input[name="mode"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        state.mode = radio.value;
+        document.getElementById('single-controls').style.display = state.mode === '3' ? 'none' : 'block';
+        render();
+      });
+    });
+ 
+    document.getElementById('column').addEventListener('change', e => {
+      state.column = e.target.value;
+      resetRef();
+      render();
+    });
+ 
+    document.getElementById('ref').addEventListener('input', e => {
+      const v = parseFloat(e.target.value);
+      if (isNaN(v)) return;
+      state.ref = v;
+      render();
+    });
+ 
+    // ---- 読み込み ----
     async function updateMapFromSheet() {
       const statusEl = document.getElementById('status');
  
@@ -92,46 +307,33 @@
         document.getElementById('map').innerHTML = svgText;
  
         // ② 都道府県コード → 要素 の対応表を作る
-        const byCode = {};
+        state.byCode = {};
         document.querySelectorAll('.prefecture').forEach(p => {
-          byCode[parseInt(p.dataset.code, 10)] = p;
+          state.byCode[parseInt(p.dataset.code, 10)] = p;
         });
  
-        // ③ スプレッドシートを取得して塗る
+        // ③ スプレッドシートを取得
         const csvText = await (await fetch(CSV_URL)).text();
-        Papa.parse(csvText, {
+        const results = Papa.parse(csvText, {
           header: true,
           skipEmptyLines: true,
-          transformHeader: h => h.trim().toLowerCase(), // 列名の空白・大文字小文字を無視
-          complete: results => {
-            const rows = results.data;
-            const fields = results.meta.fields || [];
- 
-            // 必要な列があるか確認（無ければ画面に理由を出す）
-            const missing = ['pref_id', 'green', 'blue', 'red'].filter(k => !fields.includes(k));
-            if (missing.length) {
-              statusEl.textContent = `列が見つかりません: ${missing.join(', ')}（読み取れた列: ${fields.join(', ')}）`;
-              return;
-            }
- 
-            const norm = makeNormalizer(rows, ['green', 'blue', 'red']);
-            let painted = 0;
- 
-            rows.forEach(row => {
-              const code = parseInt(row.pref_id, 10);
-              const el = byCode[code];
-              if (!el) return;
-              const rgb = mixRgb(norm(row.green), norm(row.blue), norm(row.red));
-              paint(el, rgb ? `rgb(${rgb.join(', ')})` : '#e0e0e0');
-              infoByCode[code] = { rgb, green: row.green, blue: row.blue, red: row.red };
-              if (rgb) painted++;
-            });
- 
-            statusEl.textContent = painted
-              ? `同期完了：${painted}県を着色しました`
-              : '色を計算できませんでした。pref_id が 1〜47 か、green / blue / red が数字か確認してください';
-          }
+          transformHeader: h => h.trim().toLowerCase() // 列名の空白・大文字小文字を無視
         });
+        state.rows = results.data;
+        state.fields = results.meta.fields || [];
+ 
+        if (!state.fields.includes('pref_id')) {
+          state.rows = [];
+          statusEl.textContent = `列 pref_id が見つかりません（読み取れた列: ${state.fields.join(', ')}）`;
+          return;
+        }
+        if (!state.rows.length) {
+          statusEl.textContent = 'データの行がありません';
+          return;
+        }
+ 
+        setupControls();
+        render();
       } catch (error) {
         console.error('読み込みに失敗しました:', error);
         statusEl.textContent = '読み込みに失敗しました（ローカルサーバー経由で開いていますか？）';
@@ -149,7 +351,7 @@
       clone.querySelectorAll('.prefecture').forEach(g => {
         g.style.stroke = '#ffffff';
         g.style.strokeWidth = '1.5';
-        if (!g.style.fill) g.style.fill = '#e0e0e0'; // 未着色の県
+        if (!g.style.fill) g.style.fill = NODATA; // 未着色の県
       });
       // リンク用のxlink属性は保存時に不要なので外す
       clone.querySelectorAll('a').forEach(a => {
@@ -199,12 +401,6 @@
     }
  
     // ---- タップでRGB値を表示 ----
-    const infoByCode = {}; // 都道府県コード → { rgb, green, blue, red }
- 
-    function toHex(rgb) {
-      return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
-    }
- 
     document.getElementById('map').addEventListener('click', e => {
       const pref = e.target.closest('.prefecture');
       if (!pref) return;
@@ -229,10 +425,10 @@
       const [r, g, b] = d.rgb;
       const swatch = document.createElement('span');
       swatch.className = 'swatch';
-      swatch.style.background = `rgb(${r}, ${g}, ${b})`;
+      swatch.style.background = rgbStr(d.rgb);
  
       info.append(swatch, `${name}　RGB(${r}, ${g}, ${b})　${toHex(d.rgb)}`);
-      info.append(document.createElement('br'), `green ${d.green} / blue ${d.blue} / red ${d.red}`);
+      info.append(document.createElement('br'), d.label);
     });
  
     document.getElementById('btn-png').addEventListener('click', downloadPng);
