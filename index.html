@@ -35,14 +35,15 @@
     }
     #controls .row { margin: 6px 0; }
     #controls label { margin-right: 14px; white-space: nowrap; }
+    #controls label.wrap { white-space: normal; }
     #ref { width: 7em; font-size: 15px; }
     #column { font-size: 15px; }
-    #range-hint { font-size: 13px; color: #555; }
+    #range-hint { font-size: 13px; color: #555; white-space: pre-line; }
  
     #palette-note { margin-top: 10px; font-size: 13px; color: #555; }
     #palette .row { display: flex; align-items: center; gap: 8px; }
     #palette .name { width: 7.5em; }
-    #palette input.hex { width: 6.5em; font-family: monospace; font-size: 15px; }
+    #palette input.hex { width: 9em; font-family: monospace; font-size: 15px; }
     #palette input.invalid { border: 2px solid #d33; }
  
     #legend-bar { height: 14px; margin-top: 8px; border: 1px solid #999; border-radius: 3px; }
@@ -77,9 +78,12 @@
         <label>使う列 <select id="column"></select></label>
         <label>基準値 <input type="number" id="ref" step="any"></label>
       </div>
+      <div class="row">
+        <label class="wrap"><input type="checkbox" id="common"> 全列（3列全体）の最大・最小値をそろえる（他の列・年と比較したいとき）</label>
+      </div>
       <div id="range-hint"></div>
  
-      <div id="palette-note">色はカラーコード（例：#ff0000）で変更できます</div>
+      <div id="palette-note">色はカラーコード（例：#ff0000）で変更できます。空欄にした色は使わず、残りの色の間で塗ります（2つ以上必要）。</div>
       <div id="palette"></div>
       <button id="btn-reset-colors">色を初期値に戻す</button>
     </div>
@@ -106,7 +110,7 @@
     const NODATA = '#e0e0e0';   // データのない県
     const STEP = 1;             // 2色モード：基準値から ±いくつで「基準値±1」の色になるか
     const DEFAULT_PALETTE = {
-      // 1色モード：下限 → 基準値 → 最大値
+      // 1色モード：最小値 → 基準値 → 最大値
       '1': { low: '#ffffff', ref: '#ff0000', high: '#200000' },
       // 2色モード：最小値 → 基準値-1 → 基準値 → 基準値+1 → 最大値
       '2': { low: '#000050', down: '#c0c0ff', ref: '#999999', up: '#ffc0c0', high: '#500000' }
@@ -137,25 +141,15 @@
       return lerp(ca, cb, b === a ? 1 : (v - a) / (b - a));
     }
  
-    // 1色モード：下限 → 基準値 → 最大値
-    // s.low（白になる値）は「基準値 −（最大値 − 基準値）」。c は色（RGB配列）
-    function colorOne(v, s, c) {
-      return v <= s.ref
-        ? between(v, s.low, s.ref, c.low, c.ref)
-        : between(v, s.ref, s.max, c.ref, c.high);
-    }
- 
-    // 2色モード：最小値 → 基準値-STEP → 基準値 → 基準値+STEP → 最大値
-    function colorTwo(v, s, c) {
-      const d = v - s.ref;
-      if (d >= 0) {
-        return d <= STEP
-          ? lerp(c.ref, c.up, d / STEP)
-          : between(v, s.ref + STEP, s.max, c.up, c.high);
+    // 「位置(値)と色の組」を位置の昇順に並べたものに対して、値 v の色を返す
+    // 端より外側は、端の色のまま
+    function gradientAt(v, anchors) {
+      if (v <= anchors[0].pos) return anchors[0].color;
+      for (let i = 0; i < anchors.length - 1; i++) {
+        const a = anchors[i], b = anchors[i + 1];
+        if (v <= b.pos) return between(v, a.pos, b.pos, a.color, b.color);
       }
-      return -d <= STEP
-        ? lerp(c.ref, c.down, -d / STEP)
-        : between(v, s.ref - STEP, s.min, c.down, c.low);
+      return anchors[anchors.length - 1].color;
     }
  
     // 3色モード：全列(green / blue / red)の最大値を基準に 0〜1 にする
@@ -188,45 +182,61 @@
     const state = {
       rows: [], fields: [], byCode: {},
       mode: '3', column: '', ref: 0,
+      common: false, // true：全列の最大・最小値を基準にそろえる
       palette: JSON.parse(JSON.stringify(DEFAULT_PALETTE))
     };
     const infoByCode = {}; // 都道府県コード → { rgb, label }
  
-    // 現在のモードの色コード → RGB配列
-    function paletteRgb(mode) {
-      const out = {};
-      Object.entries(state.palette[mode]).forEach(([k, hex]) => { out[k] = hexToRgb(hex); });
-      return out;
-    }
- 
-    // 列の最小・最大・中央値
-    function columnStats(col) {
-      const v = state.rows.map(r => parseFloat(r[col])).filter(x => !isNaN(x)).sort((a, b) => a - b);
+    // 数値の配列から 最小・最大・中央値
+    function statsOf(values) {
+      const v = values.filter(x => !isNaN(x)).sort((a, b) => a - b);
       if (!v.length) return null;
       const mid = Math.floor(v.length / 2);
       const median = v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
       return { min: v[0], max: v[v.length - 1], median };
     }
  
-    // 1色・2色モードの「値 → 色」の関数と、色が折れ曲がる値（凡例用）を用意する
+    // 選んだ列だけの統計
+    function columnStats(col) {
+      return statsOf(state.rows.map(r => parseFloat(r[col])));
+    }
+ 
+    // 全列（pref_id 以外）をまとめた統計
+    function allStats() {
+      const cols = state.fields.filter(f => f !== 'pref_id');
+      return statsOf(state.rows.flatMap(r => cols.map(c => parseFloat(r[c]))));
+    }
+ 
+    // 1色・2色モードの「値 → 色」の関数を用意する
     function getScale() {
       if (state.mode === '3') return null;
-      const stats = columnStats(state.column);
-      if (!stats) return null;
+      const own = columnStats(state.column);
+      if (!own) return null;
  
+      const stats = state.common ? (allStats() || own) : own; // 最大・最小の基準
       const ref = state.ref;
-      const c = paletteRgb(state.mode);
+      const pal = state.palette[state.mode];
  
+      let low = null;   // 1色モードで、基準値と最大値の差から求めた「最小値の色になる値」
+      let defs;         // [色の名前, その色になる値]
       if (state.mode === '1') {
-        // 白になる値 ＝ 基準値 −（最大値 − 基準値）。最大値が基準値以下なら最小値で代用
         const diff = stats.max - ref;
-        const low = diff > 0 ? ref - diff : stats.min;
-        const s = { ref, max: stats.max, low };
-        return { stats, low, breaks: [low, ref], colorAt: v => colorOne(v, s, c) };
+        if (pal.ref !== '' && diff > 0) low = ref - diff; // 基準値−(最大値−基準値)
+        defs = [['low', low !== null ? low : stats.min], ['ref', ref], ['high', stats.max]];
+      } else {
+        defs = [['low', stats.min], ['down', ref - STEP], ['ref', ref], ['up', ref + STEP], ['high', stats.max]];
       }
  
-      const s = { ref, max: stats.max, min: stats.min };
-      return { stats, breaks: [ref - STEP, ref, ref + STEP], colorAt: v => colorTwo(v, s, c) };
+      // 空欄の色は使わない。残った色を値の昇順に並べる
+      const anchors = defs
+        .filter(([key]) => pal[key] !== '')
+        .map(([key, pos]) => ({ pos, color: hexToRgb(pal[key]) }))
+        .sort((a, b) => a.pos - b.pos);
+ 
+      if (anchors.length < 2) {
+        return { error: '色を2つ以上指定してください（空欄の色は使いません）' };
+      }
+      return { stats, low, anchors, colorAt: v => gradientAt(v, anchors) };
     }
  
     // ---- 塗り分け ----
@@ -270,6 +280,11 @@
           updateLegend();
           return;
         }
+        if (sc.error) {
+          statusEl.textContent = sc.error;
+          updateLegend();
+          return;
+        }
         state.rows.forEach(row => {
           const v = parseFloat(row[col]);
           if (isNaN(v)) return;
@@ -290,26 +305,28 @@
       bar.style.display = text.style.display = 'none';
  
       const sc = getScale();
-      if (!sc || sc.stats.max === sc.stats.min) return;
+      if (!sc || sc.error || sc.stats.max === sc.stats.min) return;
  
       const { min, max } = sc.stats;
       const pos = v => Math.round((v - min) / (max - min) * 1000) / 10;
  
       // 色の変わり目を、実際の色計算の結果で並べる（範囲内のものだけ）
-      const points = [min, ...sc.breaks.filter(b => b > min && b < max).sort((a, b) => a - b), max];
+      const breaks = sc.anchors.map(a => a.pos).filter(p => p > min && p < max);
+      const points = [min, ...breaks, max];
       bar.style.background = 'linear-gradient(to right, '
         + points.map(v => `${rgbStr(sc.colorAt(v))} ${pos(v)}%`).join(', ') + ')';
  
-      const note = state.mode === '1'
-        ? `　／　白になる値 ${round2(sc.low)}（基準値−(最大−基準値)）`
+      const scope = state.common ? '（全列）' : '';
+      const note = sc.low !== null
+        ? `　／　最小値の色になる値 ${round2(sc.low)}（基準値−(最大−基準値)）`
         : '';
-      text.textContent = `左端＝最小 ${min}　／　基準値 ${state.ref}　／　右端＝最大 ${max}${note}`;
+      text.textContent = `左端＝最小 ${min}${scope}　／　基準値 ${state.ref}　／　右端＝最大 ${max}${scope}${note}`;
       bar.style.display = text.style.display = 'block';
     }
  
     // ---- 色コード入力欄 ----
     const PALETTE_LABELS = {
-      '1': [['high', '最大値'], ['ref', '基準値'], ['low', '下限（白）']],
+      '1': [['high', '最大値'], ['ref', '基準値'], ['low', '最小値']],
       '2': [['high', '最大値'], ['up', '基準値＋1'], ['ref', '基準値'], ['down', '基準値－1'], ['low', '最小値']]
     };
  
@@ -328,16 +345,25 @@
  
         const swatch = document.createElement('span');
         swatch.className = 'swatch';
-        swatch.style.background = state.palette[state.mode][key];
+        swatch.style.background = state.palette[state.mode][key] || 'transparent';
  
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'hex';
         input.maxLength = 7;
+        input.placeholder = '空欄＝使わない';
         input.value = state.palette[state.mode][key];
  
         input.addEventListener('input', () => {
-          const hex = normalizeHex(input.value);
+          const raw = input.value.trim();
+          if (raw === '') { // 空欄：この色は使わない
+            input.classList.remove('invalid');
+            state.palette[state.mode][key] = '';
+            swatch.style.background = 'transparent';
+            render();
+            return;
+          }
+          const hex = normalizeHex(raw);
           input.classList.toggle('invalid', !hex);
           if (!hex) return; // 途中入力・不正な値は無視
           state.palette[state.mode][key] = hex;
@@ -351,13 +377,21 @@
     }
  
     // ---- 設定画面 ----
+    // 基準値・範囲の表示を更新する
+    function updateRangeHint() {
+      const own = columnStats(state.column);
+      const all = allStats();
+      let t = own ? `この列の 最小 ${own.min} ／ 最大 ${own.max} ／ 中央値 ${own.median}` : '';
+      if (all) t += `\n全列の 最小 ${all.min} ／ 最大 ${all.max}`;
+      document.getElementById('range-hint').textContent = t;
+    }
+ 
+    // 基準値を、選んだ列の中央値に戻す
     function resetRef() {
       const stats = columnStats(state.column);
       state.ref = stats ? Math.round(stats.median * 100) / 100 : 0;
       document.getElementById('ref').value = state.ref;
-      document.getElementById('range-hint').textContent = stats
-        ? `この列の 最小 ${stats.min} ／ 最大 ${stats.max} ／ 中央値 ${stats.median}`
-        : '';
+      updateRangeHint();
     }
  
     function setupControls() {
@@ -368,8 +402,9 @@
       state.column = candidates[0] || '';
       resetRef();
  
-      // ブラウザがラジオボタンの選択を復元している場合に合わせる
+      // ブラウザがラジオボタン・チェックボックスの状態を復元している場合に合わせる
       state.mode = document.querySelector('input[name="mode"]:checked').value;
+      state.common = document.getElementById('common').checked;
       document.getElementById('single-controls').style.display = state.mode === '3' ? 'none' : 'block';
       buildPaletteInputs();
     }
@@ -385,7 +420,8 @@
  
     document.getElementById('column').addEventListener('change', e => {
       state.column = e.target.value;
-      resetRef();
+      // 全列そろえのときは、列を変えても基準値を保つ（年どうしを同じ基準で比べるため）
+      if (state.common) updateRangeHint(); else resetRef();
       render();
     });
  
@@ -393,6 +429,11 @@
       const v = parseFloat(e.target.value);
       if (isNaN(v)) return;
       state.ref = v;
+      render();
+    });
+ 
+    document.getElementById('common').addEventListener('change', e => {
+      state.common = e.target.checked;
       render();
     });
  
@@ -544,3 +585,4 @@
  
 </body>
 </html>
+ 
